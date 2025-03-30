@@ -521,6 +521,101 @@ class PointRobot1D(Model):
     
     def unnormalize(self, q):
         return q * (self.limits[:, 1]-self.limits[:, 0]) + self.limits[:, 0]
+    
+
+class PointRobot2D(Model):
+    """
+    A simple 2D point robot represented by a circle of a given radius.
+    DOF = 2 (x, y).
+    """
+    def __init__(self, radius=0.1, limits=None):
+        """
+        :param radius: The radius of the point robot. If you want a 'true point',
+                    you can set this to a very small value (e.g. 1e-3).
+        :param limits: A 2 x 2 array of joint limits in the format:
+                    [[xmin, xmax],
+                        [ymin, ymax]].
+                    If None, defaults to [-10, 10] in both x and y.
+        """
+        if limits is None:
+            limits = [[-10.0, 10.0],
+                    [-10.0, 10.0]]
+        self.limits = torch.FloatTensor(limits)
+        self.dof = 2
+        self.radius = radius
+
+        # We will store the collision object for the circle here.
+        self.collision_objs = None
+
+        # The DH parameters are not used for a point robot, but we need to keep the code consistent.
+        self.dhparams = DHParameters(
+            a = torch.zeros(2),
+            alpha = torch.zeros(2),
+            d = torch.zeros(2),
+            theta = torch.zeros(2)
+        )
+        self.c_alpha = torch.zeros(2)
+        self.s_alpha = torch.ones(2)
+
+        
+    def fkine(self, q):
+        """
+        Forward kinematics for a point robot is trivial: (x, y).
+        :param q: shape (..., 2)
+        :return: The 2D coordinates of shape (..., 1, 2).
+        """
+        q = torch.reshape(q, (-1, self.dof))  # ensure shape (N, 2)
+        return q.unsqueeze(1)  # shape (N, 1, 2)
+
+    @torch.no_grad()
+    def update_polygons(self, q):
+        """
+        Update the underlying fcl collision geometry (a circle in 2D,
+        which is effectively a cylinder in 3D).
+        We treat the circle as a 3D cylinder of small height (e.g. 1000).
+        """
+        q = torch.reshape(q, (-1, self.dof))
+        x, y = q[0, 0].item(), q[0, 1].item()
+
+        # If first time, initialize the collision object
+        if self.collision_objs is None:
+            # Cylinder in 3D with radius = self.radius and length ~1000
+            cylinder = fcl.Cylinder(self.radius, 1000.0)
+            # We'll store the single collision object in a list
+            self.collision_objs = [fcl.CollisionObject(
+                cylinder,
+                fcl.Transform(
+                    Rotation.from_rotvec([0, 0, 0]).as_quat()[[3, 0, 1, 2]],
+                    [x, y, 0.0]
+                )
+            )]
+        else:
+            # Update transform for the existing collision object
+            self.collision_objs[0].setTransform(fcl.Transform(
+                Rotation.from_rotvec([0, 0, 0]).as_quat()[[3, 0, 1, 2]],
+                [x, y, 0.0]
+            ))
+
+        return self.collision_objs
+
+    def wrap(self, q):
+        """
+        For a pure (x, y) robot, there's no angle to wrap. We simply ensure x,y are
+        clamped within limits, if desired. Alternatively, you can just return q.
+        """
+        if torch.is_tensor(q):
+            # Optionally, clamp each dimension to the user-specified limits:
+            q_clamped = []
+            for i in range(self.dof):
+                q_clamped.append(torch.clamp(q[..., i], self.limits[i, 0], self.limits[i, 1]))
+            return torch.stack(q_clamped, dim=-1)
+        else:
+            # If q is numpy, do the same
+            q = np.asarray(q)
+            for i in range(self.dof):
+                q[..., i] = np.clip(q[..., i], self.limits[i, 0].item(), self.limits[i, 1].item())
+            return q
+         
 
 def main():
     lw_data = 0.3
